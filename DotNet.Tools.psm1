@@ -39,7 +39,10 @@ function Invoke-DotnetCodeCoverage
 
     # We don't run this when running in Azure DevOps
     if(-not $env:TF_BUILD -and -not (Get-Command "reportgenerator" -ErrorAction SilentlyContinue)) {
-        dotnet tool install --global dotnet-reportgenerator-globaltool --version 4.2.11
+        dotnet tool install --global dotnet-reportgenerator-globaltool
+    }
+    else {
+        dotnet tool update --global dotnet-reportgenerator-globaltool
     }
 
     # Internal function to generate the mergewith argument
