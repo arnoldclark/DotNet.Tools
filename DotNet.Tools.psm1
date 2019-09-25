@@ -17,7 +17,7 @@ OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #>
 
-function Invoke-DotnetCodeCoverage
+function Invoke-DotnetTest
 {
     [CmdletBinding()]
     param(
@@ -27,25 +27,42 @@ function Invoke-DotnetCodeCoverage
 
         [Parameter()]
         [string]
-        $CoverletOutputFormat = 'cobertura',
+        $Tool = "coverlet.msbuild",
+
+        [Parameter()]
+        [switch]
+        $Recurse,
+
+        [Parameter()]
+        [switch]
+        $CodeCoverage,
+
+        [Parameter()]
+        [switch]
+        $GenerateReport,
 
         [Parameter()]
         [string]
-        $Tool = "coverlet.msbuild"
+        $CoverletOutputFormat = 'cobertura'
     )
 
-    # Test dependencies
+    $args = @()
+
+    # Test dependencies, fail early
     Get-Command -Name 'dotnet.exe' -CommandType Application -ErrorAction Stop | Out-Null
 
-    # We don't run this when running in Azure DevOps
-    if(-not $env:TF_BUILD -and -not (Get-Command "reportgenerator" -ErrorAction SilentlyContinue)) {
+    if($GenerateReport -and -not $CodeCoverage) {
+        throw "-GenerateReport parameter is only valid when -CodeCoverage parameter is also present."
+    }
+
+    $reportTool = Get-Command "reportgenerator" -ErrorAction SilentlyContinue
+    if($GenerateReport.IsPresent -and -not $reportTool) {
         dotnet tool install --global dotnet-reportgenerator-globaltool
     }
-    else {
+    elseif($GenerateReport.IsPresent) {
         dotnet tool update --global dotnet-reportgenerator-globaltool
     }
 
-    # Internal function to generate the mergewith argument
     $mergeWith = @()
     function Get-MergeWith {
         $mergeWith | ForEach-Object {
@@ -53,12 +70,31 @@ function Invoke-DotnetCodeCoverage
         }
     }
 
-    # Test the path exists and if file grab the directory
+    function Get-Args {
+        param(
+            [switch]
+            $Last
+        )
+
+        if ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent) {
+            $args += "--verbosity normal"
+        }
+        if($CodeCoverage.IsPresent) {
+            $args += "/p:CollectCoverage=true"
+
+            if($Last.IsPresent){
+                $args += "/p:CoverletOutputFormat=$CoverletOutputFormat" 
+            }
+
+            $args += Get-MergeWith
+        }
+    }
+
     if((Get-Item -Path $Path -ErrorAction Stop) -is [System.IO.FileInfo]) {
         $Path = $info.Directory.FullName
     }
 
-    $projects = Get-ChildItem -Path $Path -Filter '*.csproj' -Recurse |
+    $projects = Get-ChildItem -Path $Path -Filter '*.csproj' -Recurse:$Recurse |
         Where-Object {
             $xml = [xml](Get-Content -Path $_.FullName)
             $null -ne ($xml.Project.ItemGroup.PackageReference | Where-Object Include -eq 'Microsoft.NET.Test.Sdk') -and
@@ -66,29 +102,33 @@ function Invoke-DotnetCodeCoverage
         }
 
     if (-not $projects) {
-        throw "Could not find any dotnet project files in path or subpaths: $Path"
+        throw "Could not find any dotnet project files in provided path: $Path"
     }
 
     $projects | Select-Object -SkipLast 1 | ForEach-Object {
         Get-ChildItem -Path $_.Directory -Filter "coverage.json" -File | Remove-Item
-        & dotnet test /p:CollectCoverage=true $(Get-MergeWith) ""$($_.FullName)""
+        $args = Get-Args
+        Write-Verbose "Running: dotnet test $args $($_.FullName)"
+        & dotnet test (Get-Args) ""$($_.FullName)""
         $mergeWith += "$($_.Directory)/coverage.json"
     }
 
     $projects | Select-Object -Last 1 | ForEach-Object {
-        Get-ChildItem -Path $Path -Filter TestCoverage -Directory | Remove-Item -Recurse
-        & dotnet test /p:CoverletOutputFormat=$CoverletOutputFormat /p:CollectCoverage=true $(Get-MergeWith) ""$($_.FullName)""
-        & reportgenerator -reports:$(Join-Path `
-            -Path $_.Directory `
-            -ChildPath "coverage.$CoverletOutputFormat.xml") `
-            -targetdir:$Path/TestCoverage `
-            -reportTypes:htmlInline
+        Get-ChildItem -Path $Path -Filter TestCoverage -Directory | Remove-Item -Recurse:$Recurse
+        Write-Verbose "Running: dotnet test $args $($_.FullName)"
+        & dotnet test (Get-Args -Last) ""$($_.FullName)""
+
+        if($GenerateReport.IsPresent){
+            & reportgenerator -reports:$(Join-Path `
+                -Path $_.Directory `
+                -ChildPath "coverage.$CoverletOutputFormat.xml") `
+                -targetdir:$Path/TestCoverage `
+                -reportTypes:htmlInline
+        }
     }
 
-    if (-not ([Environment]::GetCommandLineArgs() -contains '-NonInteractive')) {
+    if ($GenerateReport -and
+        -not ([Environment]::GetCommandLineArgs() -contains '-NonInteractive')) {
         & "$Path/TestCoverage/index.htm"
-    }
-    else {
-        Write-Output "Environment is Non Interactive. Skipping HTML open." | Out-Default
     }
 }
